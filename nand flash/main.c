@@ -2,6 +2,7 @@
 #include "s3c2440_soc.h"
 #include "uart.h"
 #include "init.h"
+#include "nand.h"
 
 char g_Char = 'A';
 char g_Char3 = 'a';
@@ -19,8 +20,10 @@ int main(void)
 	puts("\n\rg_A = ");
 	printHex(g_A);
 	puts("\n\r");
-
-	nor_flash_test();
+	
+	puts("fuck u\n\r");
+	nand_init();
+	nand_flash_test();
 	
 	return 0;
 }
