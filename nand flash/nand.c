@@ -43,7 +43,8 @@ void nand_init(void)
 #define TWRPH1 0
     NFCONF = ((TACLS << 12) | (TWRPH0 << 8) | (TWRPH1 << 4));
     NFCONT = (1 << 4) | (1 << 1) | (1 << 0);
-    //  nand_write_reg_cmd(0xff);
+    nand_write_reg_cmd(0xff);
+    nand_wait_ready();
 }
 
 void nand_read_id(void)
@@ -152,66 +153,116 @@ void nand_read_oob(u32 page, u32 len, u8 *data)
     nand_disable_ce();
 }
 
-void nand_check(u32 addr)
+u8 nand_check(u32 addr)
 {
-    int oob_data[1];
+    int oob_data[2];
     int block = addr / 0x8000000;
     int page = block * 64;
 
     nand_read_oob(page, 1, oob_data);
     page++;
-    nand_read_oob(page, 1, oob_data);
+    nand_read_oob(page, 1, &(oob_data[1]));
+
+    if ((oob_data[0] != 0xff) || (oob_data[1] != 0xff))
+    {
+        return 0;
+    }
+    else
+    {
+        return 1;
+    }
+}
+
+int nand_erase(u32 addr, u32 len)
+{
+    int page;
+    if (addr & 0x1ffff)
+    {
+        printf("error!addr is not block aligned\r\n");
+        return -1;
+    }
+
+    if (len & 0x1ffff)
+    {
+        printf("error!len is not block aligned\r\n");
+        return -1;
+    }
+
+    page = addr / 2048;
+    while (1)
+    {
+        nand_enable_ce();
+        nand_write_reg_cmd(0x60);
+        nand_page(page);
+        nand_write_reg_cmd(0xD0);
+        nand_wait_ready();
+        nand_write_reg_cmd(0x70);
+        if (nand_read_reg_data()&0x01)
+        {
+            printf("it occur some errors during erasing the flash\r\n");
+            return -1;
+        }
+        else
+        {
+            len -= 128 * 1024;
+            if(len == 0)
+                break;
+        }
+        
+
+        nand_disable_ce();
+    }
 }
 
 void do_nand_read_test(void)
 {
     unsigned int addr;
     u32 len;
-	int i, j;
-	unsigned char c;
-	unsigned char str[16];
+    int i, j;
+    unsigned char c;
+    unsigned char str[16];
     u8 data[2048];
-	
-	/* 获得地址 */
-	printf("Enter the address to read: ");
-	addr = get_uint();
+
+    /* 获得地址 */
+    printf("Enter the address to read: ");
+    addr = get_uint();
 
     printf("Enter the length to read: ");
-	len = get_uint();
+    len = get_uint();
 
-    if(len > 2048) 
+    if (len > 2048)
     {
         len = 2048;
         printf("\r\nthe max len to read is 2048!\r\n ");
     }
 
-    nand_read(addr,len,data);
+    nand_read(addr, len, data);
 
-	printf("Data : \n\r");
-	/* 长度固定为64 */
-	for (i = 0; i < len / 16; i++)
-	{
-		/* 每行打印16个数据 */
-		for (j = 0; j < 16; j++)
-		{
-			/* 先打印数值 */
-			
-			str[j] = data[i*16+j];
-			printf("%02x ", str[j]);
-		}
+    printf("Data : \n\r");
+    /* 长度固定为64 */
+    for (i = 0; i < len / 16; i++)
+    {
+        /* 每行打印16个数据 */
+        for (j = 0; j < 16; j++)
+        {
+            /* 先打印数值 */
 
-		printf("   ; ");
+            str[j] = data[i * 16 + j];
+            printf("%02x ", str[j]);
+        }
 
-		for (j = 0; j < 16; j++)
-		{
-			/* 后打印字符 */
-			if (str[j] < 0x20 || str[j] > 0x7e)  /* 不可视字符 */
-				putchar('.');
-			else
-				putchar(str[j]);
-		}
-		printf("\n\r");
-	}
+        printf("   ; ");
+
+        for (j = 0; j < 16; j++)
+        {
+            /* 后打印字符 */
+            if (str[j] < 0x20 || str[j] > 0x7e) /* 不可视字符 */
+                putchar('.');
+            else
+                putchar(str[j]);
+        }
+        printf("\n\r");
+    }
 }
 
 void nand_flash_test(void)
@@ -231,7 +282,6 @@ void nand_flash_test(void)
         c = getchar();
         printf("fuck\r\n");
         printf("%c\n\r", c);
-        
 
         /* 测试内容:
 		 * 1. 识别nand flash
@@ -248,7 +298,7 @@ void nand_flash_test(void)
 
         case 's':
         case 'S':
-        
+
             nand_read_id();
             //do_scan_nor_flash();
             break;
