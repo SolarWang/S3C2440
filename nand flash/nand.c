@@ -1,6 +1,7 @@
 #include "s3c2440_soc.h"
 #include "my_type.h"
 #include "my_printf.h"
+#include "string_utils.h"
 
 void nand_write_reg_cmd(unsigned char cmd)
 {
@@ -10,6 +11,11 @@ void nand_write_reg_cmd(unsigned char cmd)
 void nand_write_reg_addr(unsigned char addr)
 {
     NFADDR = addr;
+}
+
+void nand_write_reg_data(u8 data)
+{
+    NFDATA = data;
 }
 
 unsigned int nand_read_reg_data(void)
@@ -33,6 +39,11 @@ void nand_wait_ready(void)
         ;
 }
 
+void clear_RnB(void)
+{
+    NFSTAT |= (1 << 2);
+}
+
 void nand_init(void)
 {
 /*
@@ -43,8 +54,11 @@ void nand_init(void)
 #define TWRPH1 0
     NFCONF = ((TACLS << 12) | (TWRPH0 << 8) | (TWRPH1 << 4));
     NFCONT = (1 << 4) | (1 << 1) | (1 << 0);
+    nand_enable_ce();
     nand_write_reg_cmd(0xff);
+
     nand_wait_ready();
+    nand_disable_ce();
 }
 
 void nand_read_id(void)
@@ -153,10 +167,10 @@ void nand_read_oob(u32 page, u32 len, u8 *data)
     nand_disable_ce();
 }
 
-u8 nand_check(u32 addr)
+u8 nand_check_bad(u32 addr)
 {
     int oob_data[2];
-    int block = addr / 0x8000000;
+    int block = addr / 0x20000;
     int page = block * 64;
 
     nand_read_oob(page, 1, oob_data);
@@ -197,7 +211,7 @@ int nand_erase(u32 addr, u32 len)
         nand_write_reg_cmd(0xD0);
         nand_wait_ready();
         nand_write_reg_cmd(0x70);
-        if (nand_read_reg_data()&0x01)
+        if (nand_read_reg_data() & 0x01)
         {
             printf("it occur some errors during erasing the flash\r\n");
             return -1;
@@ -205,13 +219,151 @@ int nand_erase(u32 addr, u32 len)
         else
         {
             len -= 128 * 1024;
-            if(len == 0)
+            if (len == 0)
                 break;
         }
-        
 
         nand_disable_ce();
     }
+    return 0;
+}
+
+int nand_write(u32 addr, u8 *data, u32 len)
+{
+    int i = 0;
+    int j = 0;
+    u32 page = addr / 2048;
+    u32 col = addr & 2047;
+
+    NFCONT &= ~(1 << 12); //unlock nand flash
+    nand_enable_ce();
+    while (i < len)
+    {
+
+        if(addr & 0x1ffff)
+        {
+            if(nand_check_bad(addr) == 0)
+            {
+                addr += 0x20000;
+                page += 64;
+            }
+        }
+
+        clear_RnB();
+        nand_write_reg_cmd(0x80);
+
+        nand_col(col);
+        nand_page(page);
+
+        for (; (i < len) && (col < 2048); col++)
+        {
+            //if (i < len)
+            {
+                nand_write_reg_data(data[i++]);
+                addr++;
+            }
+            // else
+            // {
+            //     nand_write_reg_data(0xff);
+            // }
+        }
+
+        nand_write_reg_cmd(0x10);
+        nand_wait_ready();
+        nand_write_reg_cmd(0x70);
+        if (nand_read_reg_data() & 0x1)
+        {
+            // nand_disable_ce();
+            printf("page program operation fail!\r\n");
+            break;
+        }
+        if (i == len)
+        {
+            break;
+        }
+        col = 0;
+        page++;
+        // nand_disable_ce();
+    }
+    nand_disable_ce();
+    NFCONT |= (1 << 12); //lock nand flash
+}
+
+/*addr and len are both page-alignedly needed*/
+void nand_write_with_ecc(u32 addr, u8 *data, u32 len)
+{
+    int i=0;
+    int page, col;
+    u8 ecc_buf[6];
+
+    page = addr / 2048;
+    col = addr & 2047;
+    if (col)
+    {
+        printf("error!addr is not page aligned!\r\n");
+        return;
+    }
+
+    if (col)
+    {
+        printf("error!len is not page aligned!\r\n");
+        return;
+    }
+
+    nand_enable_ce();
+    while (i<len)
+    {
+        NFCONT |= (1 << 4);               //init the ecc module
+        NFCONT &= ~((1 << 5) | (1 << 6)); //unlock main ecc and spare ecc
+
+        nand_write_reg_cmd(0x80);
+
+        nand_col(col);
+        nand_page(page);
+
+        for (;  (col < 2048); col++)
+        {
+            nand_write_reg_data(data[i++]);
+        }
+
+        NFCONT |= (1 << 5); //lock main ecc
+
+        ecc_buf[0] = NFMECC0 & 0XFF;
+        ecc_buf[1] = (NFMECC0 >> 16) & 0XFF;
+        ecc_buf[2] = NFMECC1 & 0XFF;
+        ecc_buf[3] = (NFMECC1 >> 16) & 0XFF;
+
+        nand_write_reg_data(ecc_buf[0]);
+        nand_write_reg_data(ecc_buf[1]);
+        nand_write_reg_data(ecc_buf[2]);
+        nand_write_reg_data(ecc_buf[3]);
+
+        NFCONT |= (1 << 6); //lock spare ecc
+
+        ecc_buf[4] = NFSECC & 0XFF;
+        ecc_buf[5] = (NFSECC >> 16) & 0XFF;
+
+        nand_write_reg_data(ecc_buf[4]);
+        nand_write_reg_data(ecc_buf[6]);
+        printf("fuck ww fuck you!\r\n");
+
+        nand_write_reg_cmd(0x10);
+        nand_wait_ready();
+        nand_write_reg_cmd(0x70);
+        if (nand_read_reg_data() & 0x01)
+        {
+
+            printf("page program operation fail!\r\n");
+            break;
+        }
+        if (i == len)
+        {
+            break;
+        }
+        col = 0;
+        page++;
+    }
+    nand_disable_ce();
 }
 
 void do_nand_read_test(void)
@@ -265,22 +417,161 @@ void do_nand_read_test(void)
     }
 }
 
+void do_nand_erase_test(void)
+{
+    unsigned int addr;
+    u32 len;
+    int i, j;
+    unsigned char c;
+    unsigned char str[16];
+    u8 data[2048];
+
+    while (1)
+    {
+        /* 获得地址 */
+        printf("Enter the address to erase: ");
+        addr = get_uint();
+        if (addr & 2047)
+        {
+            printf("\r\nerror!addr should be page aligned!\r\n");
+            continue;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    // while (1)
+    // {
+    //     printf("Enter the length to read: ");
+    //     len = get_uint();
+    //     if (len & 2047)
+    //     {
+    //         printf("\r\nerror!len should be page aligned!\r\n");
+    //         continue;
+    //     }
+    //     else
+    //     {
+    //         break;
+    //     }
+    // }
+
+    printf("erasing..........");
+    nand_erase(addr, 128 * 1024);
+    printf("\r\nerase finish!\r\n");
+}
+
+void do_write_nand_flash(void)
+{
+    unsigned int addr;
+    unsigned char str[100];
+    int len = 0;
+    int i = 0;
+    unsigned int val;
+
+    /* 获得地址 */
+    printf("Enter the address of sector to write: ");
+    addr = get_uint();
+
+    printf("Enter the string to write: ");
+    gets(str);
+
+    printf("the string u inserted is : %s\r\n", str);
+
+    // while (str[i] != '\0')
+    // {
+    //     len++;
+    //     i++;
+    // }
+    // len++;
+    len = strlen(str) + 1;
+    printf("length of the string u inserted is %d\r\n", len);
+    //len = strlen(str);
+
+    printf("writing ...\n\r");
+
+    /* str[0],str[1]==>16bit 
+	 * str[2],str[3]==>16bit 
+	 */
+    nand_write(addr, str, len);
+    printf("write finish! ...\n\r");
+}
+
+void do_nand_write_ecc_test(void)
+{
+    u8 data[2048];
+    int addr;
+    int i = 0;
+    /* 获得地址 */
+    printf("\r\nEnter the address of sector to write: ");
+    addr = get_uint();
+
+    if (addr & 2047)
+    {
+        printf("error!addr is not page aligned!\r\n");
+    }
+
+    for (i = 0; i < 2048; i++)
+    {
+        data[i] = i & 0xff;
+    }
+    printf("writing..........\r\n");
+    nand_write_with_ecc(addr, data, 2048);
+    printf("write finished!\r\n");
+}
+
+void do_nand_read_ecc_test(void)
+{
+    u8 data[64];
+    int addr;
+    int page;
+    int len;
+    int i = 0, j = 0;
+
+    /* 获得地址 */
+    printf("\r\nEnter the address of sector to write: ");
+    addr = get_uint();
+    printf("\r\nEnter the num of oob data u wanna get:");
+    len = get_uint();
+    if (len > 64)
+        len = 64;
+
+    page = addr / 2048;
+
+    nand_read_oob(page, len, data);
+
+    printf("data:\r\n");
+
+    for (i = 0; i < len; i++)
+    {
+       // for (j = 0; j < 16; j++)
+        {
+            printf("%02x ", data[i]);
+        }
+        if(i!=0&&i%16==0)
+        printf("\r\n");
+    }
+}
+
 void nand_flash_test(void)
 {
     char c;
 
     while (1)
     {
+    A:
         /* 打印菜单, 供我们选择测试内容 */
         printf("[s] Scan nand flash\n\r");
         printf("[e] Erase nand flash\n\r");
         printf("[w] Write nand flash\n\r");
         printf("[r] Read nand flash\n\r");
+        printf("[c] Enter ECC mode\n\r");
         printf("[q] quit\n\r");
         printf("Enter selection: ");
 
         c = getchar();
-        printf("fuck\r\n");
+        //printf("fuck\r\n");
         printf("%c\n\r", c);
 
         /* 测试内容:
@@ -305,11 +596,13 @@ void nand_flash_test(void)
 
         case 'e':
         case 'E':
+            do_nand_erase_test();
             //do_erase_nor_flash();
             break;
 
         case 'w':
         case 'W':
+            do_write_nand_flash();
             //do_write_nor_flash();
             break;
 
@@ -317,7 +610,51 @@ void nand_flash_test(void)
         case 'R':
             do_nand_read_test();
             //do_read_nor_flash();
+
+        case 'c':
+        case 'C':
+
+            while (1)
+            {
+                printf("\r\n[w] Write nand flash\n\r");
+                printf("[r] Read nand flash\n\r");
+                printf("[q] quit\n\r");
+                printf("Enter selection: ");
+                c = getchar();
+                printf("%c\r\n", c);
+
+                switch (c)
+                {
+                case 'r':
+                case 'R':
+                    do_nand_read_ecc_test();
+                    goto A;
+                    break;
+
+                case 'w':
+                case 'W':
+                    do_nand_write_ecc_test();
+                    goto A;
+                    break;
+
+                case 'q':
+                case 'Q':
+                    goto A;
+                    break;
+
+                default:
+                    goto A;
+                    break;
+                }
+            }
+
             break;
+
+        case 'i':
+        case 'I':
+
+            break;
+
         default:
             break;
         }

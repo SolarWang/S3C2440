@@ -164,3 +164,15 @@ unsigned int get_uint(void)
 }
 
 
+/**
+ * strlen - Find the length of a string
+ * @s: The string to be sized
+ */
+int strlen(const char * s)
+{
+	const char *sc;
+
+	for (sc = s; *sc != '\0'; ++sc)
+		/* nothing */;
+	return sc - s;
+}
